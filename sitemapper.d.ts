@@ -51,6 +51,16 @@ export interface SitemapperOptions {
   exclusions?: RegExp[];
 }
 
+/**
+ * Per-fetch() crawl context. Each fetch() call creates its own context so
+ * that concurrent calls on the same Sitemapper instance never share timeout,
+ * retry, cancellation or concurrency state.
+ */
+export interface SitemapperCrawlContext {
+  /** Shared limiter capping concurrent HTTP requests across the whole crawl tree. */
+  limit: <T>(fn: () => Promise<T>) => Promise<T>;
+}
+
 declare class Sitemapper {
   timeout: number;
   url: string;
@@ -63,12 +73,15 @@ declare class Sitemapper {
   rejectUnauthorized?: boolean;
   exclusions?: RegExp[];
   proxyAgent?: any;
-  timeoutTable: { [url: string]: NodeJS.Timeout };
 
   constructor(options?: SitemapperOptions);
 
-  private initializeTimeout(url: string, requester: any): void;
-  private crawl(url: string, retryIndex?: number): Promise<any>;
+  private initializeTimeout(url: string, requester: any): NodeJS.Timeout;
+  private crawl(
+    url: string,
+    retryIndex?: number,
+    context?: SitemapperCrawlContext
+  ): Promise<any>;
   private parse(url: string): Promise<any>;
   isExcluded(url: string): boolean;
 

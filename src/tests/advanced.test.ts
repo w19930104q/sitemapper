@@ -24,8 +24,8 @@ describe('Sitemapper Advanced Tests', function () {
       // Set a very short timeout
       sitemapper.timeout = 1;
 
-      // Call initializeTimeout
-      (sitemapper as any).initializeTimeout(
+      // Call initializeTimeout — it returns the timer handle owned by this call
+      const timer = (sitemapper as any).initializeTimeout(
         'https://example.com/timeout-test',
         mockRequester
       );
@@ -37,9 +37,7 @@ describe('Sitemapper Advanced Tests', function () {
       mockRequester.canceled.should.be.true();
 
       // Clean up
-      clearTimeout(
-        (sitemapper as any).timeoutTable['https://example.com/timeout-test']
-      );
+      clearTimeout(timer);
     });
   });
 

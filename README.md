@@ -175,7 +175,7 @@ Sitemapper can be customized with the following options:
       <td><code>concurrency</code></td>
       <td>Number</td>
       <td><code>10</code></td>
-      <td>Maximum number of concurrent requests when crawling multiple sitemaps</td>
+      <td>Maximum number of concurrent requests when crawling multiple sitemaps. The limit applies to all in-flight HTTP requests across the entire sitemap tree of a single <code>fetch()</code> call, including nested sitemap indexes</td>
     </tr>
     <tr>
       <td><code>retries</code></td>

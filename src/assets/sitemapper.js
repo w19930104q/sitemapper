@@ -40,7 +40,6 @@ export default class Sitemapper {
     const settings = options || { requestHeaders: {} };
     this.url = settings.url;
     this.timeout = settings.timeout || 15000;
-    this.timeoutTable = {};
     this.lastmod = settings.lastmod || 0;
     this.requestHeaders = settings.requestHeaders;
     this.debug = settings.debug;
@@ -79,8 +78,13 @@ export default class Sitemapper {
     }
 
     try {
+      // Each fetch() call gets its own crawl context so that timeout, retry
+      // and cancellation lifecycles never leak between concurrent calls, and
+      // so the concurrency limiter covers every HTTP request in the tree.
+      const context = { limit: pLimit(this.concurrency) };
+
       // crawl the URL
-      results = await this.crawl(url);
+      results = await this.crawl(url, 0, context);
     } catch (e) {
       // show errors that may occur
       if (this.debug) {
@@ -193,19 +197,20 @@ export default class Sitemapper {
       agent: this.proxyAgent,
     };
 
+    // create a request Promise with the url and request options
+    const requester = got.get(url, requestOptions);
+
+    // initialize the timeout for this specific request only. The timer is
+    // local to this call, so concurrent fetches of the same URL can never
+    // clear or cancel each other's requests.
+    const timeout = this.initializeTimeout(url, requester);
+
     try {
-      // create a request Promise with the url and request options
-      const requester = got.get(url, requestOptions);
-
-      // initialize the timeout method based on the URL, and pass the request object.
-      this.initializeTimeout(url, requester);
-
       // get the response from the requester promise
       const response = await requester;
 
-      // if the response does not have a successful status code then clear the timeout for this url.
+      // if the response does not have a successful status code then report it.
       if (!response || response.statusCode !== 200) {
-        clearTimeout(this.timeoutTable[url]);
         const statusCode = response ? response.statusCode : 0;
         const statusMessage = response ? response.statusMessage : 'No response';
         return {
@@ -258,6 +263,10 @@ export default class Sitemapper {
         error: `Error occurred: ${error.name}`,
         data: error,
       };
+    } finally {
+      // Always clear this request's own timer so no dangling timers remain
+      // after the call settles, regardless of success, error or cancellation.
+      clearTimeout(timeout);
     }
   }
 
@@ -266,12 +275,14 @@ export default class Sitemapper {
    * too long, but will still allow the promises to resolve.
    *
    * @private
-   * @param {string} url - url to use as a hash in the timeoutTable
+   * @param {string} url - url of the request being timed
    * @param {Promise} requester - the promise that creates the web request to the url
+   * @returns {Timeout} the timer handle, owned by the caller, which must be
+   * cleared once the request settles
    */
   initializeTimeout(url, requester) {
     // this will throw a CancelError which will be handled in the parent that calls this method.
-    this.timeoutTable[url] = setTimeout(() => requester.cancel(), this.timeout);
+    return setTimeout(() => requester.cancel(), this.timeout);
   }
 
   /**
@@ -280,13 +291,22 @@ export default class Sitemapper {
    * @private
    * @param {string} url - the Sitemaps url (e.g https://wp.seantburke.com/sitemap.xml)
    * @param {integer} retryIndex - number of retry attempts fro this URL (e.g. 0 for 1st attempt, 1 for second attempty etc.)
+   * @param {Object} [context] - per-fetch() crawl context carrying the shared
+   * concurrency limiter. When omitted (direct calls), a fresh context is
+   * created so the call still has its own lifecycle.
    * @returns {Promise<SitesData>}
    */
-  async crawl(url, retryIndex = 0) {
+  async crawl(url, retryIndex = 0, context) {
+    // The limiter is shared by the whole crawl tree of a single fetch() call,
+    // so the concurrency cap applies to all actual HTTP requests in the tree
+    // rather than each sitemap index level getting its own pool.
+    const activeContext = context || { limit: pLimit(this.concurrency) };
     try {
-      const { error, data } = await this.parse(url);
-      // The promise resolved, remove the timeout
-      clearTimeout(this.timeoutTable[url]);
+      // Only the HTTP request itself holds a limiter slot. The slot is
+      // released before child sitemaps are crawled, which both caps the
+      // number of in-flight requests tree-wide and prevents nested sitemap
+      // indexes from deadlocking when concurrency is low.
+      const { error, data } = await activeContext.limit(() => this.parse(url));
 
       if (error) {
         // Handle errors during sitemap parsing / request
@@ -299,7 +319,7 @@ export default class Sitemapper {
               }) ${url} due to ${data.name} on previous request`
             );
           }
-          return this.crawl(url, retryIndex + 1);
+          return this.crawl(url, retryIndex + 1, activeContext);
         }
 
         if (this.debug) {
@@ -376,10 +396,11 @@ export default class Sitemapper {
             return !this.isExcluded(url);
           });
 
-        // Parse all child urls within the concurrency limit in the settings
-        const limit = pLimit(this.concurrency);
+        // Crawl all child urls. Each child acquires a limiter slot around its
+        // own HTTP request, so the shared limiter caps requests across the
+        // whole tree, including deeper index levels.
         const promiseArray = sitemap.map((site) =>
-          limit(() => this.crawl(site))
+          this.crawl(site, 0, activeContext)
         );
 
         // Make sure all the promises resolve then filter and reduce the array
@@ -406,7 +427,7 @@ export default class Sitemapper {
             }) ${url} due to ${data.name} on previous request`
           );
         }
-        return this.crawl(url, retryIndex + 1);
+        return this.crawl(url, retryIndex + 1, activeContext);
       }
       if (this.debug) {
         console.error(`Unknown state during "crawl('${url})'":`, error, data);
